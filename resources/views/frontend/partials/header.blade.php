@@ -22,7 +22,8 @@
                                     <li class="account_link"> <i class="icofont-user-alt-7"></i><a href="#">Account</a>
                                         <ul class="dropdown_account_link">
                                             <li><a href="{{ route('account.dashboard') }}">My Account</a></li>
-                                            <li><a href="{{ route('account.login-register') }}">Login</a></li>
+                                            <!-- <li><a href="{{ route('account.login-register') }}">Login</a></li> -->
+                                            <li><a href="{{ route('login') }}">Login</a></li>
                                             <li><a href="{{ route('contact') }}">Contact</a></li>
                                         </ul>
                                     </li>
@@ -51,7 +52,7 @@
                                         </ul>
                                     </li>
                                     <li><a{!! $active('about') !!} href="{{ route('about') }}">About</a></li>
-                                    <li><a{!! $active(['faq', 'not-found']) !!} href="#">Pages</a>
+                                    <li><a{!! $active(['faq', 'not-found']) !!} href="{{route('faq')}}">Pages</a>
                                         <ul class="bucker-dropdown">
                                             <li><a href="{{ route('faq') }}">FAQ</a></li>
                                             <li><a href="{{ route('not-found') }}">Error 404</a></li>

@@ -4,6 +4,7 @@ use App\Http\Controllers\frontend\AccountController;
 use App\Http\Controllers\frontend\CartController;
 use App\Http\Controllers\frontend\CheckoutController;
 use App\Http\Controllers\Frontend\ProductController;
+use App\Http\Controllers\frontend\SafepayWebhookController;
 use App\Http\Controllers\Frontend\ShopController;
 use App\Http\Controllers\frontend\WishlistController;
 use App\Http\Controllers\HomeController;
@@ -100,6 +101,18 @@ Route::middleware(['auth', 'customer'])->group(function () {
 
     Route::put('/my-account/details', [UserController::class, 'updateAccountDetails'])
         ->name('account.details.update');
+
+    Route::get('/payment/safepay/success/{order}', [CheckoutController::class, 'safepaySuccess'])
+        ->name('payment.safepay.success');
+
+    Route::get('/payment/safepay/cancel/{order}', [CheckoutController::class, 'safepayCancel'])
+        ->name('payment.safepay.cancel');
+
+    Route::post('/webhooks/safepay', [SafepayWebhookController::class, 'handle'])
+        ->name('webhooks.safepay');
+
+    Route::post('/webhooks/safepay', [CheckoutController::class, 'safepayWebhook'])
+        ->name('webhooks.safepay');
 });
 Route::view('compare', 'frontend.cart.compare')->name('compare');
 

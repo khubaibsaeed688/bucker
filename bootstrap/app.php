@@ -20,6 +20,10 @@ return Application::configure(basePath: dirname(__DIR__))
             'superadmin' => SuperAdminMiddleware::class,
             'customer' => CustomerMiddleware::class,
         ]);
+
+        $middleware->validateCsrfTokens(except: [
+            'webhooks/safepay',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

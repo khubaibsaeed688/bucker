@@ -6,10 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Models\Cart;
 use App\Models\Coupon;
 use App\Models\Order;
+use App\Services\SafepayService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
+use Safepay\Webhook;
+use Safepay\Exception\SignatureVerificationException;
 
 class CheckoutController extends Controller
 {
@@ -29,17 +33,14 @@ class CheckoutController extends Controller
                 ->with('error', 'Your cart is empty.');
         }
 
-        // Calculate subtotal
         $subtotal = $cartItems->sum(function ($item) {
             return $item->price * $item->quantity;
         });
 
-        // Coupon calculation
         $discount = 0;
         $appliedCoupon = null;
 
         if (session()->has('applied_coupon')) {
-
             $appliedCoupon = Coupon::where(
                 'code',
                 session('applied_coupon')
@@ -59,12 +60,14 @@ class CheckoutController extends Controller
         }
 
         if ($appliedCoupon) {
-
             if ($appliedCoupon->type === 'percentage') {
                 $discount = ($subtotal * $appliedCoupon->value) / 100;
 
                 if ($appliedCoupon->max_discount !== null) {
-                    $discount = min($discount, $appliedCoupon->max_discount);
+                    $discount = min(
+                        $discount,
+                        $appliedCoupon->max_discount
+                    );
                 }
             } else {
                 $discount = $appliedCoupon->value;
@@ -73,7 +76,6 @@ class CheckoutController extends Controller
 
         $discount = min($discount, $subtotal);
 
-        // Shipping is currently free
         $shippingCost = 0;
 
         $total = $subtotal - $discount + $shippingCost;
@@ -88,14 +90,14 @@ class CheckoutController extends Controller
         ));
     }
 
-
-
-    public function store(Request $request)
-    {
-        // Step 1: Validate form data
+    public function store(
+        Request $request,
+        SafepayService $safepayService
+    ) {
+        // 1. Validate checkout form.
         $validated = $request->validate([
 
-            // Billing Details
+            // Billing details
             'first_name' => 'required|string|max:255',
             'last_name' => 'required|string|max:255',
             'company' => 'nullable|string|max:255',
@@ -108,13 +110,13 @@ class CheckoutController extends Controller
             'email' => 'required|email|max:255',
             'phone' => 'required|string|max:30',
 
-            // Payment
-            'payment_method' => 'required|in:cod,bank_transfer,paypal',
+            // Payment methods
+            'payment_method' => 'required|in:cod,bank_transfer,online',
 
-            // Order Notes
+            // Order notes
             'order_notes' => 'nullable|string',
 
-            // Shipping
+            // Shipping details
             'ship_to_different_address' => 'nullable|boolean',
 
             'shipping_first_name' => 'required_if:ship_to_different_address,1|nullable|string|max:255',
@@ -127,9 +129,9 @@ class CheckoutController extends Controller
             'shipping_phone' => 'nullable|string|max:30',
         ]);
 
-        // Step 2: Get customer cart
+        // 2. Get customer's cart.
         $cart = Cart::with('items.product')
-            ->where('user_id', auth()->id())
+            ->where('user_id', Auth::id())
             ->first();
 
         $cartItems = $cart
@@ -142,7 +144,7 @@ class CheckoutController extends Controller
                 ->with('error', 'Your cart is empty.');
         }
 
-        // Step 3: Calculate subtotal from cart
+        // 3. Calculate subtotal.
         $subtotal = $cartItems->sum(function ($item) {
             return $item->price * $item->quantity;
         });
@@ -151,10 +153,12 @@ class CheckoutController extends Controller
         $discount = 0;
         $coupon = null;
 
-        // Step 4: Verify applied coupon
+        // 4. Verify coupon.
         if (session()->has('applied_coupon')) {
-
-            $coupon = Coupon::where('code', session('applied_coupon'))
+            $coupon = Coupon::where(
+                'code',
+                session('applied_coupon')
+            )
                 ->where('is_active', true)
                 ->lockForUpdate()
                 ->first();
@@ -172,14 +176,16 @@ class CheckoutController extends Controller
             }
         }
 
-        // Step 5: Calculate discount
+        // 5. Calculate discount.
         if ($coupon) {
-
             if ($coupon->type === 'percentage') {
                 $discount = ($subtotal * $coupon->value) / 100;
 
                 if ($coupon->max_discount !== null) {
-                    $discount = min($discount, $coupon->max_discount);
+                    $discount = min(
+                        $discount,
+                        $coupon->max_discount
+                    );
                 }
             } else {
                 $discount = $coupon->value;
@@ -190,16 +196,15 @@ class CheckoutController extends Controller
 
         $total = $subtotal - $discount + $shippingCost;
 
-        // Step 6: Check shipping address checkbox
+        // 6. Shipping checkbox.
         $differentAddress = $request->boolean(
             'ship_to_different_address'
         );
 
-        // Step 7: Save order and order items
+        // 7. Create order and order items.
         $order = DB::transaction(function () use (
             $validated,
             $cartItems,
-            $cart,
             $subtotal,
             $shippingCost,
             $discount,
@@ -207,7 +212,6 @@ class CheckoutController extends Controller
             $differentAddress,
             $coupon
         ) {
-
             $order = Order::create([
 
                 'user_id' => Auth::id(),
@@ -222,7 +226,7 @@ class CheckoutController extends Controller
                 'status' => 'pending',
                 'payment_status' => 'pending',
 
-                // Billing Details
+                // Billing details
                 'first_name' => $validated['first_name'],
                 'last_name' => $validated['last_name'],
                 'company' => $validated['company'] ?? null,
@@ -238,7 +242,7 @@ class CheckoutController extends Controller
                 'order_notes' => $validated['order_notes'] ?? null,
                 'payment_method' => $validated['payment_method'],
 
-                // Shipping Details
+                // Shipping details
                 'ship_to_different_address' => $differentAddress,
 
                 'shipping_first_name' => $differentAddress
@@ -274,9 +278,8 @@ class CheckoutController extends Controller
                     : null,
             ]);
 
-            // Save each cart item as an order item
+            // Save order items.
             foreach ($cartItems as $item) {
-
                 $itemSubtotal = $item->price * $item->quantity;
 
                 $order->items()->create([
@@ -288,22 +291,204 @@ class CheckoutController extends Controller
                 ]);
             }
 
-            // Update coupon usage
+            // Update coupon usage.
             if ($coupon) {
                 $coupon->increment('used_count');
             }
 
-            // Empty customer cart
-            $cart->items()->delete();
-
             return $order;
         });
 
-        // Step 8: Clear applied coupon
+        // 8. Online payment through Safepay.
+        if ($order->payment_method === 'online') {
+            try {
+                $checkoutUrl = $safepayService->createCheckoutUrl(
+                    $order,
+                    route('payment.safepay.success', $order->id),
+                    route('payment.safepay.cancel', $order->id)
+                );
+
+                Log::info('Safepay checkout URL generated', [
+                    'order_id' => $order->id,
+                    'url_generated' => !empty($checkoutUrl),
+                    'valid_url' => filter_var($checkoutUrl, FILTER_VALIDATE_URL) !== false,
+                    'url_host' => parse_url($checkoutUrl, PHP_URL_HOST),
+                ]);
+
+                // Keep cart until payment is verified.
+                session()->forget('applied_coupon');
+
+                return redirect()->away($checkoutUrl);
+            } catch (\Throwable $e) {
+
+                Log::error('Safepay checkout failed', [
+                    'order_id' => $order->id,
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+
+                return back()
+                    ->withInput()
+                    ->with(
+                        'error',
+                        'Safepay checkout failed. Order Number: ' . $order->order_number
+                    );
+            }
+        }
+
+        // 9. COD and bank transfer.
+        $cart = Cart::where('user_id', Auth::id())->first();
+
+        if ($cart) {
+            $cart->items()->delete();
+        }
+
         session()->forget('applied_coupon');
 
         return redirect()
             ->route('cart')
-            ->with('success', 'Your order has been placed successfully. Order Number: ' . $order->order_number);
+            ->with(
+                'success',
+                'Your order has been placed successfully. Order Number: ' . $order->order_number
+            );
+    }
+
+    // Safepay success redirect.
+    // This does NOT confirm payment.
+    public function safepaySuccess(Order $order)
+    {
+        abort_unless($order->user_id === Auth::id(), 403);
+
+        return redirect()
+            ->route('cart')
+            ->with(
+                'success',
+                'Safepay has returned you to Bucker. Your payment is awaiting server-side verification. Order Number: ' . $order->order_number
+            );
+    }
+
+    // Safepay cancellation redirect.
+    public function safepayCancel(Order $order)
+    {
+        abort_unless($order->user_id === Auth::id(), 403);
+
+        return redirect()
+            ->route('cart')
+            ->with(
+                'warning',
+                'Payment was not completed. Your order remains pending. You can contact support for assistance. Order Number: ' . $order->order_number
+            );
+    }
+
+
+
+    public function safepayWebhook(Request $request)
+    {
+        $signature = $request->header('X-SFPY-SIGNATURE');
+        $secret = config('payment.safepay.webhook_secret');
+
+        if (!$signature || !$secret) {
+            Log::error('Safepay webhook: Missing signature or secret.');
+            return response('Missing signature', 400);
+        }
+
+        // Safepay requires the original raw request body.
+        $payload = $request->getContent();
+
+        try {
+            $event = Webhook::constructEvent(
+                $payload,
+                $signature,
+                $secret
+            );
+        } catch (\UnexpectedValueException $e) {
+            Log::error('Safepay invalid webhook payload: ' . $e->getMessage());
+            return response('Invalid payload', 400);
+        } catch (SignatureVerificationException $e) {
+            Log::error('Safepay signature verification failed: ' . $e->getMessage());
+            return response('Invalid signature', 400);
+        }
+
+        $eventType = $event->type ?? null;
+        $payment = $event->data ?? null;
+
+        Log::info('Safepay verified webhook received', [
+            'event_type' => $eventType,
+        ]);
+
+        // Find Bucker order ID from tracker metadata.
+        $metadata = $payment->metadata ?? [];
+
+        if (is_object($metadata)) {
+            $metadata = (array) $metadata;
+        }
+
+        $orderId = $metadata['order_id']
+            ?? $metadata['data']['order_id']
+            ?? null;
+
+        if (!$orderId) {
+            Log::error('Safepay webhook: Order ID missing.', [
+                'metadata' => $metadata,
+            ]);
+
+            return response('Order ID missing', 400);
+        }
+
+        $order = Order::find($orderId);
+
+        if (!$order || $order->payment_method !== 'online') {
+            return response('Order not found', 404);
+        }
+
+        if ($eventType === 'payment.succeeded') {
+
+            DB::transaction(function () use ($order) {
+
+                $lockedOrder = Order::whereKey($order->id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($lockedOrder->payment_status === 'paid') {
+                    return;
+                }
+
+                $lockedOrder->update([
+                    'payment_status' => 'paid',
+                    'status' => 'confirmed',
+                ]);
+
+                $cart = Cart::where(
+                    'user_id',
+                    $lockedOrder->user_id
+                )->first();
+
+                if ($cart) {
+                    $cart->items()->delete();
+                }
+            });
+
+            Log::info('Safepay payment marked as paid.', [
+                'order_id' => $order->id,
+            ]);
+
+            return response('Payment confirmed', 200);
+        }
+
+        if ($eventType === 'payment.failed') {
+
+            $order->update([
+                'payment_status' => 'failed',
+            ]);
+
+            Log::warning('Safepay payment failed.', [
+                'order_id' => $order->id,
+            ]);
+
+            return response('Payment failed recorded', 200);
+        }
+
+        return response('Event received', 200);
     }
 }
